@@ -47,8 +47,8 @@ class RNN(chainer.Chain):
         self.margin_rate = params["margin_rate"]
         self.dropout = params["dropout"]
 
-    # early_update 1 ari 0 nasi
-    def __call__(self, xs, ls, early_update=0):
+    # early_update True ari False nasi
+    def __call__(self, xs, ls, early_update=True):
         # make vector
         x_len = [len(x) for x in xs]
         x_section = np.cumsum(x_len[:-1])
@@ -57,14 +57,13 @@ class RNN(chainer.Chain):
         hy, cy, ys = self.bi_lstm(hx=None, cx=None, xs=exs)
         ys = F.concat(ys, axis=0) ### これをしないとNStepBiLSTMはbackward()できなくなる
         ys = F.split_axis(ys, x_section, 0, force_tuple=True)
-        self.action = self.action_embed(xp.asarray([1, 0], dtype=xp.int32))
+        self.action = self.action_embed(xp.asarray([0, 1], dtype=xp.int32))
 
         ###  make character score
         char_scores = []
         for y in ys:
             char_scores.append(self.make_char_score(y))
 
-        ### search
         cum_loss = 0
         pred_labels = []
         for x, cs, l in zip(xs, char_scores, ls):
@@ -72,8 +71,9 @@ class RNN(chainer.Chain):
             cum_loss += loss
             pred_labels.append(pred_label)
         return cum_loss, pred_labels
+#        return self.search(xs[2], char_scores[2], ls[2], early_update)
 
-    def make_char_score(self, y): #shape=(l, 2, lstmout+action*2)を生成, 2はsep,appの順
+    def make_char_score(self, y): #shape=(l, 2, lstmout+action*2)を生成, 2はapp,sepの順
         y_matrix = F.broadcast_to(F.expand_dims(y, axis = 1), (len(y), 2, len(y[0])))
         action_matrix = F.broadcast_to(self.action, (len(y), 2, len(self.action[0])))
         char_vecs = F.concat((y_matrix, action_matrix), axis = 2)
@@ -85,43 +85,34 @@ class RNN(chainer.Chain):
 
     def search(self, x, cs, l, early_update):
         gold_score = 0
-        gold_word = ""
-        agenda = [[0, 3, "", [1]]] # [score, pred_select, currentword, label_list]
+        agenda = [[0, [1]]] #[score, label_list]
 
         for i in range(1, len(l)-1):
-            select = self._gold_select(l, i)
-            gold_word, gold_word_score = self._word_vec_score(gold_word, int(x[i]), select)
-            gold_score = gold_score + cs[i][select] + gold_word_score
+            gold_score = gold_score + cs[i][l[i]]
 
             beam = []
-            for one in agenda:  #agenda内の1つ1つにactionを付与したスコアを算出していく
-                if one[1] == 2 or one[1] == 3: #e or s
-                    tmp_label = one[3] + [1]
-                    tmp_word, tmp_word_loss = self._word_vec_score(one[2], int(x[i]), 0)
-                    beam.append([one[0] + cs[i][0] + tmp_word_loss, 0, tmp_word, tmp_label])
-                    tmp_label = one[3] + [1]
-                    tmp_word, tmp_word_loss = self._word_vec_score(one[2], int(x[i]), 3)
-                    beam.append([one[0] + cs[i][3] + tmp_word_loss, 3, tmp_word, tmp_label])
-                if one[1] == 0 or one[1] == 1: #b or m
-                    tmp_label = one[3] + [0]
-                    tmp_word, tmp_word_loss = self._word_vec_score(one[2], int(x[i]), 1)
-                    beam.append([one[0] + cs[i][1] + tmp_word_loss, 1, tmp_word, tmp_label])
-                    tmp_label = one[3] + [0]
-                    tmp_word, tmp_word_loss = self._word_vec_score(one[2], int(x[i]), 2)
-                    beam.append([one[0] + cs[i][2] + tmp_word_loss, 2, tmp_word, tmp_label])
+            for one in agenda:
+                if l[i] == 0: #goldはappだった sepにmarginが増える
+                    app_margin = 0
+                    sep_margin = self.margin_rate
+                else:
+                    app_margin = self.margin_rate
+                    sep_margin = 0
+                tmp_label = one[1] + [0]
+                beam.append([one[0] + cs[i][0] + app_margin, tmp_label])
+                tmp_label = one[1] + [1]
+                beam.append([one[0] + cs[i][1] + sep_margin, tmp_label])
+                
             beam.sort(key=lambda x: x[0].data, reverse=True)
             agenda = beam[:params["beam_size"]]
             
-            if early_update == 1: # 1の時はearly updateする
-                frag = 0
-                for one in agenda:
-                    if abs(one[0].data - gold_score.data) <= 0.00001 * abs(max(one[0].data, gold_score.data)):
-                        frag = 1
-                if frag == 0:
+            
+            if early_update == True:
+                if agenda[-1][0].data > gold_score.data:
                     break
 
         pred_score = agenda[0][0]
-        pred_label = agenda[0][3] + [1]
+        pred_label = agenda[0][1] + [1]
         pred_label += [7 for _ in range(len(l)-len(pred_label))]
         xpzero = xp.zeros([], dtype=xp.float32)
         loss = F.max(F.stack([xpzero, pred_score - gold_score]))
