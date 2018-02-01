@@ -20,10 +20,6 @@ import path
 
 params = {"FREQ_times":3, "SENT_len":300, "embedding_size":100, "batch_size":10, "CHAR_size":3000,"hidden_size":150, "action_size":50, "prescore_size":300, "wordvec_size":200, "LSTM_units":1, "dropout":0.2, "margin_rate":0.2, "beam_size":8}
 
-# train_path = '/home/yamaguchi.13093/corpus/chainer/text/train'
-# test_path = '/home/yamaguchi.13093/corpus/chainer/text/test'
-# wiki_path = '/home/yamaguchi.13093/corpus/entity_vector/entity.txt'
-# dict_path = '/home/yamaguchi.13093/corpus/mecab-jumandic-7.0-20130310/all.csv'
 train_path, test_path, wiki_path, dict_path = path.path()
 
 xp = cuda.cupy
