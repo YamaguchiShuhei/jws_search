@@ -2,3 +2,4 @@ README
 path.py
 *~
 __pycache__
+*.re

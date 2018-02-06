@@ -44,7 +44,7 @@ class RNN(chainer.Chain):
         self.dropout = params["dropout"]
 
     # early_update True ari False nasi
-    def __call__(self, xs, ls, early_update=True):
+    def __call__(self, xs, ls, early_update=False):
         # make vector
         x_len = [len(x) for x in xs]
         x_section = np.cumsum(x_len[:-1])
@@ -136,16 +136,6 @@ class RNN(chainer.Chain):
             current_word = ''
         return current_word, score
 
-    def _gold_select(self, l, i): #bmes順
-        if l[i] == 1 and l[i+1] == 0:
-            return 0
-        if l[i] == 0 and l[i+1] == 0:
-            return 1
-        if l[i] == 0 and l[i+1] == 1:
-            return 2
-        if l[i] == 1 and l[i+1] == 1:
-            return 3
-
 def _correct_counter(pred_selection, l):
     correct = 0
     reach = 0
@@ -217,12 +207,32 @@ def accuracy_count(pred, gold):
             count += 1
     return count
 
+def demo(text, model):
+    char_list = [train.char_id["BOS"]]
+    label_list = [1]
+    for c in text:
+        label_list.append(1)
+        if c in train.char_id:
+            char_list.append(train.char_id[c])
+        else:
+            char_list.append(len(train.char_id))
+    char_list.append(train.char_id["EOS"])
+    label_list.append(1)
+    _, label = model(xp.array([char_list], dtype=xp.int32), xp.array([label_list], dtype=xp.int32), early_update=False)
+    label[0].pop(0)
+    for n, c in enumerate(text):
+        if label[0][n] == 1:
+            print("/", end="")
+        print(c, end="")
+    print()
+
+
 train = data.Dataset(params)
 train.newread(train_path, wiki_path=wiki_path)
 dict_id, dict_list = data.make_dict(dict_path, train)
-#valid = (train.data[:500], train.label[:500])
-#del train.data[:500]
-#del train.label[:500]
+valid = (train.data[:500], train.label[:500])
+del train.data[:500]
+del train.label[:500]
 
 print("data load")
 
@@ -232,14 +242,6 @@ model.to_gpu()
 optimizer = optimizers.Adam()
 optimizer.setup(model)
 print("model made")
-
-##hogee
-xs = [xp.asarray(train.data[7], dtype=xp.int32),
-      xp.asarray(train.data[8], dtype=xp.int32),
-      xp.asarray(train.data[9], dtype=xp.int32),
-      xp.asarray(train.data[10], dtype=xp.int32)]
-ls = [train.label[7], train.label[8], train.label[9], train.label[10]]
-
 
 #####################
 ##test
@@ -272,7 +274,7 @@ ls = [train.label[7], train.label[8], train.label[9], train.label[10]]
 #     for k in range(len(small_data[0])):
 #         x = [xp.asarray(small_data[0][k], dtype=xp.int32)]
 #         model.cleargrads()
-#         loss, pred_labels = model(x, [small_data[1][k]], 1)
+#         loss, pred_labels = model(x, [small_data[1][k]], True)
 #         loss.backward()
 #         optimizer.update()
 #     print("-----------------------")
@@ -299,7 +301,7 @@ ls = [train.label[7], train.label[8], train.label[9], train.label[10]]
 #             x = [xp.asarray(train.data[i], dtype=xp.int32) for i in range(n,n+10)]
 #             l = [train.label[i] for i in range(n,n+10)]
 #             model.cleargrads()
-#             loss, pred_labels = model(x, l, 1)
+#             loss, pred_labels = model(x, l, True)
 #             loss.backward()
 #             optimizer.update()
 #             count += accuracy_count(l[0], pred_labels[0]) - 2
@@ -311,7 +313,14 @@ ls = [train.label[7], train.label[8], train.label[9], train.label[10]]
 #     save_path = sys.argv[2] + "/" + str(epoch)
 #     serializers.save_npz(save_path, model)
 #     print("----------------------------------------------------------------------------")
-    
+
+for i in range(35):
+    tmp = "cs_result.re/" + str(i)
+    serializers.load_npz(tmp, model)
+    recorder(valid, i, "cs.re/result")
+    save = "cs.re/" + str(i)
+    serializers.save_npz(save, model)
+    print("----------------------------------------------------------------------------")
 
 # how to reverse
 # data.reverse(x[0], l, train.char_id)
