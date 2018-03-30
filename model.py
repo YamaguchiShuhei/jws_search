@@ -217,6 +217,8 @@ class ASVECWV_left(chainer.Chain):
         else:
             return self.lwv(self.wv_embed(xp.array([len(self.word_id)], dtype=xp.int32)))[0][0]
 
+
+
 class ASVECWV_right(chainer.Chain):
     """charscore by appsep vector and vordscore by wv"""
     def __init__(self, params, dataset):
@@ -276,31 +278,33 @@ class ASVECWV_right(chainer.Chain):
         return char_scores
 
     def search(self, x, cs, l, early_update):
+        tmp_x = x.tolist() #x をnumpyから listに変換しておく
+        tmp_l = l[1:] + [1] #l を一ますずらしてright対応型にしておく
         gold_score = 0
-        gold_word = tuple([x[0].tolist()])
-        agenda = [[0, [1], tuple([x[0].tolist()])]] #[score, label_list, current_word]
-
-        for i in range(1, len(l)):
-            if l[i] == 0:
-                gold_score = gold_score + cs[i][l[i]]
-                gold_word = tuple(list(gold_word) + [x[i].tolist()])
+        gold_word = []
+        agenda = [[0, [1], []]] #[score, label_list, current_word]
+        
+        for i in range(1, len(tmp_l) - 1):
+            if tmp_l[i] == 0:
+                gold_score = gold_score + cs[i][0]
+                gold_word = gold_word + [tmp_x[i]]
             else:
-                gold_word = tuple(list(gold_word) + [x[i].tolist()])
-                gold_score = gold_score + cs[i][l[i]] + self._word_vec_score(gold_word)
-                gold_word = tuple([])
+                gold_word = gold_word + [tmp_x[i]]
+                gold_score = gold_score + cs[i][1] + self._word_vec_score(tuple(gold_word))
+                gold_word = []
                 
             beam = []
             for one in agenda:
-                if l[i] == 0: #goldはappだった sepにmarginが増える
+                if tmp_l[i] == 0: #goldはappだった sepにmarginが増える
                     app_margin = 0
                     sep_margin = self.margin_rate
                 else:
                     app_margin = self.margin_rate
                     sep_margin = 0
                 tmp_label = one[1] + [0]
-                beam.append([one[0] + cs[i][0] + app_margin, tmp_label, tuple(list(one[2]) + [x[i].tolist()])])
+                beam.append([one[0] + cs[i][0] + app_margin, tmp_label, one[2] + [tmp_x[i]]])
                 tmp_label = one[1] + [1]
-                beam.append([one[0] + cs[i][1] + sep_margin + self._word_vec_score(tuple(list(one[2]) + [x[i].tolist()])), tmp_label, tuple([])])
+                beam.append([one[0] + cs[i][1] + sep_margin + self._word_vec_score(tuple(one[2] + [tmp_x[i]])), tmp_label, []])
                 
             beam.sort(key=lambda x: x[0].data, reverse=True)
             agenda = beam[:params["beam_size"]]
@@ -310,7 +314,115 @@ class ASVECWV_right(chainer.Chain):
                     break
 
         pred_score = agenda[0][0]
-        pred_label = agenda[0][1]
+        pred_label = [1] + agenda[0][1]
+        pred_label += [7 for _ in range(len(l)-len(pred_label))]
+        xpzero = xp.zeros([], dtype=xp.float32)
+        loss = F.max(F.stack([xpzero, pred_score - gold_score]))
+        return loss, pred_label
+
+    def _word_vec_score(self, word):
+        """return word_score by word"""
+        if word in self.word_id:
+            return self.lwv(self.wv_embed(xp.array([self.word_id[word]], dtype=xp.int32)))[0][0]
+        else:
+            return self.lwv(self.wv_embed(xp.array([len(self.word_id)], dtype=xp.int32)))[0][0]
+
+class ASVECRNNWV_right(chainer.Chain):
+    """charscore by appsep vector and vordscore by wv"""
+    def __init__(self, params, dataset):
+        super(ASVECWV_right, self).__init__()
+        with self.init_scope():
+            self.embed=L.EmbedID(len(dataset.char_id)+1, params["embedding_size"])
+            self.action_embed = L.EmbedID(2, params["action_size"])
+            self.bi_lstm = L.NStepBiLSTM(params["LSTM_units"], params["embedding_size"], params["hidden_size"], params["dropout"])
+            self.l1 = L.Linear(params["hidden_size"]*2+params["action_size"], params["prescore_size"])
+            self.l2 = L.Linear(params["prescore_size"], 1)
+            self.lwv = L.Linear(200, 1)
+            self.wv_embed = L.EmbedID(len(dataset.word_id)+1, 200, xp.array(dataset.vectors, xp.float32))
+            self.pos_embed = L.EmbedID(len(dataset.pos_id)+1, 200)
+            self.posdetail_embed = L.EmbedID(len(dataset.posdetail_id)+1, 200)
+            self.useful_embed = L.EmbedID(len(dataset.useful_id)+1, 200)
+            self.conjugative_embed = L.EmbedID(len(dataset.conjugative_id)+1, 200)
+        self.n_layer = params["LSTM_units"]
+        self.n_units = 150
+        self.margin_rate = params["margin_rate"]
+        self.dropout = params["dropout"]
+        self.word_id = dataset.word_id
+
+
+    # early_update True ari False nasi
+    def __call__(self, xs, ls, early_update=False):
+        # make vector
+        x_len = [len(x) for x in xs]
+        x_section = np.cumsum(x_len[:-1])
+        ex = F.dropout(self.embed(F.concat(xs, axis=0)), self.dropout)
+        exs = F.split_axis(ex, x_section, 0, force_tuple=True)
+        hy, cy, ys = self.bi_lstm(hx=None, cx=None, xs=exs)
+        ys = F.concat(ys, axis=0) ### これをしないとNStepBiLSTMはbackward()できなくなる
+        ys = F.split_axis(ys, x_section, 0, force_tuple=True)
+        self.action = self.action_embed(xp.asarray([0, 1], dtype=xp.int32))
+
+        ###  make character score
+        char_scores = []
+        for y in ys:
+            char_scores.append(self.make_char_score(y))
+
+        cum_loss = 0
+        pred_labels = []
+        for x, cs, l in zip(xs, char_scores, ls):
+            loss, pred_label  = self.search(x, cs, l, early_update)
+            cum_loss += loss
+            pred_labels.append(pred_label)
+        return cum_loss, pred_labels
+
+    def make_char_score(self, y): #shape=(l, 2, lstmout+action*2)を生成, 2はapp,sepの順
+        y_matrix = F.broadcast_to(F.expand_dims(y, axis = 1), (len(y), 2, len(y[0])))
+        action_matrix = F.broadcast_to(self.action, (len(y), 2, len(self.action[0])))
+        char_vecs = F.concat((y_matrix, action_matrix), axis = 2)
+        # calc score
+        char_list = F.reshape(char_vecs, (len(char_vecs)*2, len(char_vecs[0][0])))
+        char_listscore = self.l2(F.tanh(self.l1(char_list)))
+        char_scores = F.reshape(char_listscore, (len(char_vecs), 2))
+        return char_scores
+
+    def search(self, x, cs, l, early_update):
+        tmp_x = x.tolist() #x をnumpyから listに変換しておく
+        tmp_l = l[1:] + [1] #l を一ますずらしてright対応型にしておく
+        gold_score = 0
+        gold_word = []
+        agenda = [[0, [1], []]] #[score, label_list, current_word]
+        
+        for i in range(1, len(tmp_l) - 1):
+            if tmp_l[i] == 0:
+                gold_score = gold_score + cs[i][0]
+                gold_word = gold_word + [tmp_x[i]]
+            else:
+                gold_word = gold_word + [tmp_x[i]]
+                gold_score = gold_score + cs[i][1] + self._word_vec_score(tuple(gold_word))
+                gold_word = []
+                
+            beam = []
+            for one in agenda:
+                if tmp_l[i] == 0: #goldはappだった sepにmarginが増える
+                    app_margin = 0
+                    sep_margin = self.margin_rate
+                else:
+                    app_margin = self.margin_rate
+                    sep_margin = 0
+                tmp_label = one[1] + [0]
+                beam.append([one[0] + cs[i][0] + app_margin, tmp_label, one[2] + [tmp_x[i]]])
+                tmp_label = one[1] + [1]
+                beam.append([one[0] + cs[i][1] + sep_margin + self._word_vec_score(tuple(one[2] + [tmp_x[i]])), tmp_label, []])
+                
+            beam.sort(key=lambda x: x[0].data, reverse=True)
+            agenda = beam[:params["beam_size"]]
+
+            if early_update == True:
+                if agenda[-1][0].data > gold_score.data:
+                    break
+
+        pred_score = agenda[0][0]
+        pred_label = [1] + agenda[0][1]
         pred_label += [7 for _ in range(len(l)-len(pred_label))]
         xpzero = xp.zeros([], dtype=xp.float32)
         loss = F.max(F.stack([xpzero, pred_score - gold_score]))
