@@ -58,7 +58,7 @@ valid = (train.data[:500], train.label[:500], train.pos_label[:500], train.posde
 del train.data[:500], train.label[:500], train.pos_label[:500], train.posdetail_label[:500], train.useful_label[:500], train.conjugative_label[:500]
 print("data load")
 
-model = model.ASVECWV_right(params, train)
+model = model.ASVECRNNWV_right(params, train)
 cuda.get_device(0).use()
 model.to_gpu()
 optimizer = optimizers.Adam()
@@ -134,7 +134,7 @@ for epoch in range(40):
     record.recorder(valid, epoch, sys.argv[1], model)
     save_path = sys.argv[2] + "/" + str(epoch)
     serializers.save_npz(save_path, model)
-    print("----------------------------------------------------------------------------")
+    print("----------------------------------------------------------------------------") 
 
 
 # how to reverse

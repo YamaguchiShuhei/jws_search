@@ -218,7 +218,6 @@ class ASVECWV_left(chainer.Chain):
             return self.lwv(self.wv_embed(xp.array([len(self.word_id)], dtype=xp.int32)))[0][0]
 
 
-
 class ASVECWV_right(chainer.Chain):
     """charscore by appsep vector and vordscore by wv"""
     def __init__(self, params, dataset):
@@ -294,13 +293,13 @@ class ASVECWV_right(chainer.Chain):
                 gold_word = []
                 
             beam = []
+            if tmp_l[i] == 0: #goldはappだった sepにmarginが増える
+                app_margin = 0
+                sep_margin = self.margin_rate
+            else:
+                app_margin = self.margin_rate
+                sep_margin = 0
             for one in agenda:
-                if tmp_l[i] == 0: #goldはappだった sepにmarginが増える
-                    app_margin = 0
-                    sep_margin = self.margin_rate
-                else:
-                    app_margin = self.margin_rate
-                    sep_margin = 0
                 tmp_label = one[1] + [0]
                 beam.append([one[0] + cs[i][0] + app_margin, tmp_label, one[2] + [tmp_x[i]]])
                 tmp_label = one[1] + [1]
@@ -327,10 +326,11 @@ class ASVECWV_right(chainer.Chain):
         else:
             return self.lwv(self.wv_embed(xp.array([len(self.word_id)], dtype=xp.int32)))[0][0]
 
+        
 class ASVECRNNWV_right(chainer.Chain):
     """charscore by appsep vector and vordscore by wv"""
     def __init__(self, params, dataset):
-        super(ASVECWV_right, self).__init__()
+        super(ASVECRNNWV_right, self).__init__()
         with self.init_scope():
             self.embed=L.EmbedID(len(dataset.char_id)+1, params["embedding_size"])
             self.action_embed = L.EmbedID(2, params["action_size"])
@@ -339,10 +339,11 @@ class ASVECRNNWV_right(chainer.Chain):
             self.l2 = L.Linear(params["prescore_size"], 1)
             self.lwv = L.Linear(200, 1)
             self.wv_embed = L.EmbedID(len(dataset.word_id)+1, 200, xp.array(dataset.vectors, xp.float32))
-            self.pos_embed = L.EmbedID(len(dataset.pos_id)+1, 200)
-            self.posdetail_embed = L.EmbedID(len(dataset.posdetail_id)+1, 200)
-            self.useful_embed = L.EmbedID(len(dataset.useful_id)+1, 200)
-            self.conjugative_embed = L.EmbedID(len(dataset.conjugative_id)+1, 200)
+            self.wv_lstm = L.NStepLSTM(params["LSTM_units"], 200, 200, params["dropout"])
+            # self.pos_embed = L.EmbedID(len(dataset.pos_id)+1, 200)
+            # self.posdetail_embed = L.EmbedID(len(dataset.posdetail_id)+1, 200)
+            # self.useful_embed = L.EmbedID(len(dataset.useful_id)+1, 200)
+            # self.conjugative_embed = L.EmbedID(len(dataset.conjugative_id)+1, 200)
         self.n_layer = params["LSTM_units"]
         self.n_units = 150
         self.margin_rate = params["margin_rate"]
@@ -370,7 +371,7 @@ class ASVECRNNWV_right(chainer.Chain):
         cum_loss = 0
         pred_labels = []
         for x, cs, l in zip(xs, char_scores, ls):
-            loss, pred_label  = self.search(x, cs, l, early_update)
+            loss, pred_label = self.search(x, cs, l, early_update)
             cum_loss += loss
             pred_labels.append(pred_label)
         return cum_loss, pred_labels
@@ -389,34 +390,49 @@ class ASVECRNNWV_right(chainer.Chain):
         tmp_x = x.tolist() #x をnumpyから listに変換しておく
         tmp_l = l[1:] + [1] #l を一ますずらしてright対応型にしておく
         gold_score = 0
-        gold_word = []
-        agenda = [[0, [1], []]] #[score, label_list, current_word]
+        gold_word = [[tmp_x[0]], []]
+        agenda = [ [0, [1], [[tmp_x[0]], []]] ] #[score, label_list, pred_word]
         
         for i in range(1, len(tmp_l) - 1):
+            words_list = [] # 1文字探索するうちに生じる単語は全部一括でword_scoreを出してしまう
+            gold_word[-1] += [tmp_x[i]] #sepでもappでも末尾に文字は確実に足す
             if tmp_l[i] == 0:
                 gold_score = gold_score + cs[i][0]
-                gold_word = gold_word + [tmp_x[i]]
             else:
-                gold_word = gold_word + [tmp_x[i]]
-                gold_score = gold_score + cs[i][1] + self._word_vec_score(tuple(gold_word))
-                gold_word = []
+                gold_score = gold_score + cs[i][1]# + self._word_vec_score(tuple(gold_word))
+                words_list.append(gold_word)
+                gold_word.append([])
                 
             beam = []
-            for one in agenda:
-                if tmp_l[i] == 0: #goldはappだった sepにmarginが増える
-                    app_margin = 0
-                    sep_margin = self.margin_rate
-                else:
-                    app_margin = self.margin_rate
-                    sep_margin = 0
-                tmp_label = one[1] + [0]
-                beam.append([one[0] + cs[i][0] + app_margin, tmp_label, one[2] + [tmp_x[i]]])
+            if tmp_l[i] == 0: #goldはappだった sepにmarginが増える
+                app_margin = 0
+                sep_margin = self.margin_rate
+            else:
+                app_margin = self.margin_rate
+                sep_margin = 0
+            for one in agenda:# 先にsepの探索を行う listの参照渡しに気をつけて、しかし重複は避けたいな
                 tmp_label = one[1] + [1]
-                beam.append([one[0] + cs[i][1] + sep_margin + self._word_vec_score(tuple(one[2] + [tmp_x[i]])), tmp_label, []])
+                tmp_word = one[2][:-1] + [one[2][-1] + [tmp_x[i]]]
+                words_list.append(tmp_word)
+                tmp_word.append([])
+                beam.append([one[0] + cs[i][1] + sep_margin, tmp_label, tmp_word])
+            # この後wordscoreの足しが入る
+
+            j = 0
+            for k, word_score in enumerate(self._word_vec_score(words_list)):
+                if k == 0 and sep_margin == 0: #goldの単語スコアを計算している時
+                    gold_score += word_score[0]
+                    continue
+                beam[j][0] += word_score[0]
+                j += 1
+            
+            for one in agenda: #appの探索スペース
+                tmp_label = one[1] + [0]
+                tmp_word = one[2][:-1] + [one[2][-1] + [tmp_x[i]]]
+                beam.append([one[0] + cs[i][0] + app_margin, tmp_label, tmp_word])
                 
             beam.sort(key=lambda x: x[0].data, reverse=True)
             agenda = beam[:params["beam_size"]]
-
             if early_update == True:
                 if agenda[-1][0].data > gold_score.data:
                     break
@@ -428,13 +444,21 @@ class ASVECRNNWV_right(chainer.Chain):
         loss = F.max(F.stack([xpzero, pred_score - gold_score]))
         return loss, pred_label
 
-    def _word_vec_score(self, word):
+    def _word_vec_score(self, words_list):
         """return word_score by word"""
-        if word in self.word_id:
-            return self.lwv(self.wv_embed(xp.array([self.word_id[word]], dtype=xp.int32)))[0][0]
-        else:
-            return self.lwv(self.wv_embed(xp.array([len(self.word_id)], dtype=xp.int32)))[0][0]
+        words_array = [xp.array([self.word_id[tuple(word)] if tuple(word) in self.word_id else len(self.word_id) for word in words], dtype = xp.int32) for words in words_list]
+        # make vector
+        words_len = [len(words) for words in words_array]
+        words_section = np.cumsum(words_len[:-1])
+        ewords = F.dropout(self.wv_embed(F.concat(words_array, axis=0)), self.dropout)
+        ewords_list = F.split_axis(ewords, words_section, 0, force_tuple=True)
+        hy, cy, wys = self.wv_lstm(hx=None, cx=None, xs=ewords_list)
+        wys = F.concat(wys, axis=0) ### これをしないとNStepBiLSTMはbackward()できなくなる
+        wys = F.split_axis(wys, words_section, 0, force_tuple=True)
+        word_vec = F.reshape(F.concat([wy[-1] for wy in wys], axis=0), [-1, 200])
+        return self.lwv(word_vec)
 
+        
 class ASVECWVMO_left(chainer.Chain):
     """charscore by appsep vector and wordscore by mo inf"""
     def __init__(self, params, dataset):
