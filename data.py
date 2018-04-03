@@ -202,20 +202,31 @@ class Morpheme:
             self.conjugative = dataset.conjugative_id[word[7]]
         else:
             self.conjugative = len(dataset.conjugative_id)
-        
+
+    def oow(self, dataset):
+        self.line = "未知語"
+        self.pos = len(dataset.pos_id)
+        self.posdetail = len(dataset.posdetail_id)
+        self.useful = len(dataset.useful_id)
+        self.conjugative = len(dataset.conjugative_id)
         
 
 class Word:
-    def __init__(self):
+    """表層によって管理される単語情報"""
+    def __init__(self, dataset):
         self.raw = None
         self.word_id = None
-        self.morphemes = []
+        self.tup = None
+        morpheme = Morpheme() ###初回に未知語まで登録してしまう
+        morpheme.oow(dataset)
+        self.morphemes = [morpheme]
         
     def read(self, word, dataset):
+        """表層に対して形態素情報は個別だが、word_idは固有"""
         self.raw = word[0]
-        tup = word2tuple(word[0], dataset.char_id)
-        if tup in dataset.word_id:
-            self.word_id = dataset.word_id[tup]
+        self.tup = word2tuple(word[0], dataset.char_id)
+        if self.tup in dataset.word_id:
+            self.word_id = dataset.word_id[self.tup]
         else:
             self.word_id = len(dataset.word_id)
         morpheme = Morpheme()
@@ -223,9 +234,25 @@ class Word:
         self.morphemes.append(morpheme)
 
     def add(self, word, dataset):
+        """形態素情報のみの追加"""
         morpheme = Morpheme()
         morpheme.read(word, dataset)
         self.morphemes.append(morpheme)
+
+    def push(self):
+        word = []
+        pos = []
+        posdetail = []
+        useful = []
+        conjugative = []
+        for morpheme in self.morphemes:
+            word.append(self.word_id)
+            pos.append(morpheme.pos)
+            posdetail.append(morpheme.posdetail)
+            useful.append(morpheme.useful)
+            conjugative.append(morpheme.conjugative)
+        return (word, pos, posdetail, useful, conjugative)
+        
 
 def make_dict(dict_path, dataset):
     start = time.time()
@@ -239,7 +266,7 @@ def make_dict(dict_path, dataset):
         tup = word2tuple(word[0], char_id)
         if tup not in dict_id:
             dict_id[tup] = len(dict_id)
-            tmp = Word()
+            tmp = Word(dataset)
             tmp.read(word, dataset)
             dict_list.append(tmp)
         else:
@@ -275,7 +302,7 @@ def idx2char(idx, char_id):
         print("#", end="")
 
 def word_vector_reverse(word, char_id):
-    for char in word.split('_')[:-1]:
+    for char in word:
         idx2char(int(char), char_id)
     print()
 
